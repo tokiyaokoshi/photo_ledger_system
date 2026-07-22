@@ -1,7 +1,7 @@
 Option Explicit
 
 ' ==========================================
-' 写真台帳自動作成マクロ（3枚グループ化対応）
+' 写真台帳自動作成マクロ（最終ページの空白削除対応版）
 ' ==========================================
 Sub CreatePhotoLedger()
     Dim fd As FileDialog
@@ -38,6 +38,14 @@ Sub CreatePhotoLedger()
     ' 4. フォルダ処理の開始
     Call ProcessFolder(fso, fso.GetFolder(targetFolder), 0, targetFolder)
     
+    ' ==========================================
+    ' ▼追加：最後の余分な改ページ（空白ページ）を削除
+    ' ==========================================
+    Selection.EndKey Unit:=wdStory
+    Selection.TypeBackspace
+    Selection.TypeBackspace
+    ' ==========================================
+    
     Application.ScreenUpdating = True
     MsgBox "写真台帳の作成が完了しました！", vbInformation
 End Sub
@@ -57,15 +65,29 @@ Sub ProcessFolder(fso As Object, folder As Object, depth As Integer, rootFolder 
         If headingLevel < 1 Then headingLevel = 1
         If headingLevel > 9 Then headingLevel = 9
         
+        ' 見出し名から「00_」などの数字プレフィックスを除去
+        Dim displayName As String
+        Dim underscorePos As Integer
+        
+        displayName = folder.Name
+        underscorePos = InStr(displayName, "_")
+        
+        ' 最初の「_」が存在し、かつ「_」より前が数字の場合のみ除去
+        If underscorePos > 1 Then
+            If IsNumeric(Left(displayName, underscorePos - 1)) Then
+                displayName = Mid(displayName, underscorePos + 1)
+            End If
+        End If
+        
         Selection.EndKey Unit:=wdStory
         ' Wordの標準組み込みスタイル（wdStyleHeading1 = -2）を計算して適用
         Selection.Style = ActiveDocument.Styles(-2 - (headingLevel - 1))
-        Selection.TypeText Text:=folder.Name
+        Selection.TypeText Text:=displayName
         Selection.TypeParagraph
         Selection.Style = ActiveDocument.Styles("標準") ' スタイルを標準に戻す
     End If
     
-    ' ▼2. フォルダ内の画像ファイルだけを配列に集める（Pythonの valid_images に相当）
+    ' ▼2. フォルダ内の画像ファイルだけを配列に集める
     Dim arrFiles() As String
     Dim fileCount As Integer: fileCount = 0
     For Each file In folder.Files
@@ -79,7 +101,7 @@ Sub ProcessFolder(fso As Object, folder As Object, depth As Integer, rootFolder 
     
     ' ▼3. 画像がある場合は表を作成
     If fileCount > 0 Then
-        ' ファイル名順にソート（Pythonの sorted に相当）
+        ' ファイル名順にソート
         Dim x As Integer, y As Integer, tempStr As String
         For x = 1 To fileCount - 1
             For y = x + 1 To fileCount
@@ -104,14 +126,22 @@ Sub ProcessFolder(fso As Object, folder As Object, depth As Integer, rootFolder 
             If currentChunkSize > chunkSize Then currentChunkSize = chunkSize
             
             Selection.EndKey Unit:=wdStory
+            
+            ' 表の「上」に改行を追加
+            Selection.TypeParagraph
+            
             Set tbl = ActiveDocument.Tables.Add(Range:=Selection.Range, NumRows:=currentChunkSize + 1, NumColumns:=2)
             tbl.Borders.Enable = True ' 表に格子線を引く
             
-            ' 列幅の設定 (11.5cm と 4.5cm)
-            tbl.Columns(1).PreferredWidthType = wdPreferredWidthPoints
-            tbl.Columns(1).PreferredWidth = CentimetersToPoints(11.5)
-            tbl.Columns(2).PreferredWidthType = wdPreferredWidthPoints
-            tbl.Columns(2).PreferredWidth = CentimetersToPoints(4.5)
+            ' 表の横幅を余白いっぱいに広げる
+            tbl.PreferredWidthType = wdPreferredWidthPercent
+            tbl.PreferredWidth = 100 ' ページ幅100%
+            
+            ' 左の画像列を72%、右の備考列を28%の比率で分割
+            tbl.Columns(1).PreferredWidthType = wdPreferredWidthPercent
+            tbl.Columns(1).PreferredWidth = 72
+            tbl.Columns(2).PreferredWidthType = wdPreferredWidthPercent
+            tbl.Columns(2).PreferredWidth = 28
             
             ' ヘッダーの設定
             tbl.Cell(1, 1).Range.Text = "表示画面"
@@ -127,16 +157,32 @@ Sub ProcessFolder(fso As Object, folder As Object, depth As Integer, rootFolder 
                 cellRange.ParagraphFormat.Alignment = wdAlignParagraphCenter
                 
                 Set shp = ActiveDocument.InlineShapes.AddPicture(FileName:=arrFiles(i + r - 1), LinkToFile:=False, SaveWithDocument:=True, Range:=cellRange)
+                
+                ' 画像サイズ調整（縦横比維持）
                 shp.LockAspectRatio = msoTrue
-                shp.Width = CentimetersToPoints(11) ' 画像幅を11cmに縮小
+                
+                ' 1. まず1ページに3枚収まる安全な高さ（7.5cm）を指定
+                shp.Height = CentimetersToPoints(7.5)
+                
+                ' 2. 表の幅が広がったのに合わせて、限界幅を13cmに拡張
+                If shp.Width > CentimetersToPoints(13) Then
+                    shp.Width = CentimetersToPoints(13)
+                End If
                 
                 ' 備考（ファイル名）の挿入（右セル）
                 tbl.Cell(r + 1, 2).Range.Text = fso.GetBaseName(arrFiles(i + r - 1))
             Next r
             
-            ' 表の後に改ページを入れる
             Selection.EndKey Unit:=wdStory
             Selection.InsertBreak Type:=wdPageBreak
+            
+            ' カーソルを1つ左（改ページ記号の直前）に戻す
+            Selection.MoveLeft Unit:=wdCharacter, Count:=2
+            ' Backspaceキーを押して、表と改ページの間の隙間を削除する
+            Selection.TypeBackspace
+            
+            ' 次の処理のためにカーソルを一番後ろに戻す
+            Selection.EndKey Unit:=wdStory
         Next i
     End If
     
